@@ -1,0 +1,20 @@
+# Pixel-art diffusion training repo — pinned environment.
+#
+# torch/torchvision use the CUDA 13.0 build (current recommended build for an
+# Ampere-class GPU such as the RTX 3050 — verified against
+# download.pytorch.org in Aug 2026). The --extra-index-url line makes a plain
+# `pip install -r requirements.txt` pull the CUDA wheels.
+#
+# NOTE: these CUDA wheels require Python >= 3.10 (this project uses 3.13).
+# If you are stuck on Python 3.9, install torch==2.8.0+cu128 /
+# torchvision==0.23.0+cu128 instead (see setup.md).
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130
+
+datasets>=3.2.0
+huggingface_hub>=0.27.0
+pillow>=10.0.0
+numpy>=1.26.0
+tqdm>=4.66.0
+matplotlib>=3.8.0

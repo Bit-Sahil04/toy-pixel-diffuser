@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data_raw/
+checkpoints/
+samples/
+logs/
+wandb/
+pip_torch.log
