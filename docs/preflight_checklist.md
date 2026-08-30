@@ -44,10 +44,13 @@ end-to-end score can false-alarm:
     ⚠️ Do NOT probe at low t (≤150): x_t is mostly signal there, so even an
     untrained model scores ~0.99 — the metric is only meaningful at t ≥ 300.
   * **Stage B — end-to-end sampler**: full 1000-step DDPM sample from pure
-    noise; NCC vs targets. PASS bar: 0.5. This is where residual training error
-    shows up amplified: at ε-MSE ≈ 0.08 (300 overfit steps) samples score
-    NCC ≈ 0.1 even though the pipeline is perfectly fine — that run false-
-    alarmed and the stage split exists to prevent exactly that.
+    noise; each sample is scored against its NEAREST of the 8 targets
+    (best-match NCC). PASS bar: mean best-match > 0.5. Two rules baked in
+    blood: (1) sampling does NOT preserve slot order — sample i is SOME
+    training image, so positional pairing scores ~0.1 on a perfectly working
+    sampler (this false-alarmed once); (2) residual training error is
+    amplified 1000×, so ε-MSE ≈ 0.08 after only 300 overfit steps also scores
+    ~0.1 despite a healthy pipeline — hence Stage A gates Stage B.
 Failure routing: Stage A fails while loss still falls → UNDERTRAINED, raise
 MAX_STEPS. Stage A fails with flat loss → STRUCTURAL BUG, stop. Stage B fails
 after Stage A passes → SAMPLER BUG, stop.
