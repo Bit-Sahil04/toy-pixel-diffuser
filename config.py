@@ -44,7 +44,8 @@ class Config:
     weight_decay: float = 0.0
     max_train_steps: int = 20000
     ema_decay: float = 0.9999
-    max_vram_gb: float = 4.0            # soft guard: warn if estimate exceeds this
+    max_vram_gb: float | None = None    # None = auto-detect from the active GPU (recommended).
+                                        # Set explicitly to override the soft guard's total.
     vram_safety_fraction: float = 0.85  # warn if heuristic estimate > this fraction of VRAM
     seed: int = 42
 

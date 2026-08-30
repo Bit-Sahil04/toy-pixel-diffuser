@@ -66,14 +66,15 @@ def estimate_vram_gb(cfg: Config) -> float:
     return param_gb + act_gb
 
 
-def vram_guard(cfg: Config) -> None:
+def vram_guard(cfg: Config, total_vram_gb: float) -> None:
     est = estimate_vram_gb(cfg)
-    limit = cfg.max_vram_gb * cfg.vram_safety_fraction
+    limit = total_vram_gb * cfg.vram_safety_fraction
     print(f"[vram-guard] heuristic estimate: {est:.2f} GB "
-          f"(batch={cfg.batch_size}, size={cfg.image_size}, base_ch={cfg.base_channels})")
+          f"(batch={cfg.batch_size}, size={cfg.image_size}, base_ch={cfg.base_channels}) "
+          f"vs {total_vram_gb:.2f} GB total VRAM")
     if est > limit:
         print(f"[vram-guard] WARNING: estimate exceeds safe fraction "
-              f"({cfg.vram_safety_fraction:.0%}) of {cfg.max_vram_gb:.0f}GB VRAM. "
+              f"({cfg.vram_safety_fraction:.0%}) of {total_vram_gb:.2f}GB VRAM. "
               f"Lower batch_size (try 4-8), reduce image_size, or lower base_channels.")
         print("[vram-guard] Continuing anyway — this is a soft guard. Expect OOM risk.")
 
@@ -171,7 +172,8 @@ def main() -> None:
     if device.type == "cpu":
         sys.exit("No CUDA device found — run check_env.py first (see setup.md).")
 
-    vram_guard(cfg)
+    vram_guard(cfg, cfg.max_vram_gb if cfg.max_vram_gb is not None
+               else torch.cuda.get_device_properties(0).total_memory / 1024**3)
 
     # ------------------------------ data ------------------------------
     images_dir, captions_csv = ensure_data()
