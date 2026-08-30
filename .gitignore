@@ -2,8 +2,14 @@
 __pycache__/
 *.pyc
 data_raw/
-checkpoints/
-samples/
-logs/
-wandb/
 pip_torch.log
+wandb/
+
+# artifacts are produced locally; keep the dirs via .gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+samples/*
+!samples/.gitkeep
+logs/*
+!logs/.gitkeep
+*.log

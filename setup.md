@@ -64,6 +64,9 @@ inspect):
 python data.py
 ```
 
+Verified on first run (2026-08-30): **50,000 images, all 128 x 128 RGBA**, so
+the default `image_size: 128` trains at native resolution with no resampling.
+
 Notes baked into the code (see data.py docstring for the full rationale):
 
 * RGBA sprites are composited onto a fixed **white** background, not silently
@@ -86,7 +89,14 @@ python train.py --resume_from checkpoints/latest.pt # resume after interrupt
 
 Defaults are sized for 4GB: batch_size 8, image_size 128, base_channels 64,
 channel_mults (1,2,4), AMP on. A `--max_vram_gb` soft guard prints a warning
-at startup if the configured run looks likely to OOM.
+at startup if the configured run looks likely to OOM (heuristic estimate for
+the defaults: ~1.8 GB).
+
+Timing note (measured on this 3050): training is ~1-2 s/step at the defaults,
+but each 4x4 sample grid runs a full 1000-step DDPM ancestral pass (~15-20
+min) — `sample_every: 200` therefore adds roughly 8-10% sampling overhead.
+Run `python -u train.py ...` when redirecting to a log file so progress
+prints appear immediately (stdout is block-buffered otherwise).
 
 Outputs:
 
