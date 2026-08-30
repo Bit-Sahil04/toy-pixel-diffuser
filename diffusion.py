@@ -159,4 +159,4 @@ class Diffusion:
             noise = torch.randn(x.shape, generator=gen, dtype=torch.float32).to(device)
             x = mean + var.sqrt() * noise
         model.train(was_training)
-        return denormalize(x)
+        return denormalize(x).contiguous()

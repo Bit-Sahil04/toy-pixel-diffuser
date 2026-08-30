@@ -183,6 +183,10 @@ def main() -> None:
     if device.type == "cpu":
         sys.exit("No CUDA device found — run check_env.py first (see setup.md).")
 
+    # Conv autotuning: all batches have identical shapes (drop_last=True), so
+    # cudnn.benchmark's one-time kernel search pays off every step after.
+    torch.backends.cudnn.benchmark = True
+
     vram_guard(cfg, cfg.max_vram_gb if cfg.max_vram_gb is not None
                else torch.cuda.get_device_properties(0).total_memory / 1024**3)
 
@@ -204,6 +208,9 @@ def main() -> None:
 
     # ------------------------------ model ------------------------------
     model = build_model(cfg).to(device)
+    # NHWC layout: feeds tensor cores in their preferred format (~1.2-1.5x on
+    # conv-heavy nets). Weights + inputs must both be channels_last.
+    model = model.to(memory_format=torch.channels_last)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params / 1e6:.2f}M params, prediction_target={cfg.prediction_target}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -252,6 +259,7 @@ def main() -> None:
                 data_iter = iter(loader)
                 batch = next(data_iter)
             x0 = batch["image"].to(device, non_blocking=True)
+            x0 = x0.to(memory_format=torch.channels_last)
 
             # Mixed precision is ON by default — required to fit 4GB comfortably.
             with torch.amp.autocast("cuda"):
@@ -283,7 +291,7 @@ def main() -> None:
 
         # ------------- fixed-seed qualitative samples (primary eval) -------------
         if step % cfg.sample_every == 0 or step == start_step + 1:
-            ema_model = build_model(cfg).to(device)
+            ema_model = build_model(cfg).to(device).to(memory_format=torch.channels_last)
             ema.copy_to(ema_model)
             grid_n = cfg.sample_grid * cfg.sample_grid
             imgs = diffusion.sample(ema_model, grid_n, cfg.image_size, seed=cfg.sample_seed)
