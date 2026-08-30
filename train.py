@@ -79,6 +79,13 @@ def vram_guard(cfg: Config, total_vram_gb: float) -> None:
         print("[vram-guard] Continuing anyway — this is a soft guard. Expect OOM risk.")
 
 
+def format_eta(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+
 class EMA:
     """Exponential moving average of model weights.
 
@@ -255,8 +262,11 @@ def main() -> None:
 
         if step % 10 == 0 or step == start_step + 1:
             lr_now = optimizer.param_groups[0]["lr"]
+            # average includes sampling/checkpoint pauses so the ETA is honest wall-clock
+            sps = (time.time() - t0) / max(step - start_step, 1)
+            eta = format_eta((cfg.max_train_steps - step) * sps)
             print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr_now:.2e} | "
-                  f"{(time.time() - t0) / max(step - start_step, 1):.2f} s/step")
+                  f"{sps:.2f} s/step | eta {eta}")
 
         with open(log_path, "a", newline="") as f:
             csv.writer(f).writerow([step, f"{accum_loss:.6f}",
