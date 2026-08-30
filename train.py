@@ -140,6 +140,10 @@ def main() -> None:
     parser.add_argument("--max_vram_gb", type=float, default=None)
     parser.add_argument("--prediction_target", type=str, default=None,
                         choices=("epsilon", "v_prediction"))
+    parser.add_argument("--checkpoint_dir", type=str, default=None,
+                        help="override output dir for checkpoints (e.g. a Google Drive path on Colab)")
+    parser.add_argument("--samples_dir", type=str, default=None)
+    parser.add_argument("--log_csv", type=str, default=None)
     args = parser.parse_args()
 
     cfg = Config()
@@ -150,6 +154,9 @@ def main() -> None:
     cfg.unconditional = args.unconditional
     if args.max_vram_gb is not None: cfg.max_vram_gb = args.max_vram_gb
     if args.prediction_target is not None: cfg.prediction_target = args.prediction_target
+    if args.checkpoint_dir is not None: cfg.checkpoint_dir = args.checkpoint_dir
+    if args.samples_dir is not None: cfg.samples_dir = args.samples_dir
+    if args.log_csv is not None: cfg.log_csv = args.log_csv
 
     if not cfg.unconditional:
         # Phase-2 seam: the dataset already returns captions when
