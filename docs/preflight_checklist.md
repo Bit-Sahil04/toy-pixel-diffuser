@@ -2,8 +2,9 @@
 
 Purpose: catch bugs like the sampler-math error we actually had (healthy loss,
 broken samples) in minutes, not after a 22-hour run. Applies to all 4 projects
-in this course. Takes 10–20 minutes total — cheaper than one wasted GPU day,
-every time.
+in this course. **Budget ~30–35 minutes on a T4** (smoke ~7, tiny-overfit ~12,
+scheduler ~1, config ~1, throughput/resume ~15 — most of it unavoidable sample
+grids). Cheaper than one wasted GPU day, every time.
 
 Do not skip to "just run it" because the code looks right. The whole point of
 this checklist is that code that looks right (correct-looking formula,
@@ -12,7 +13,10 @@ sensible-sounding config) was exactly what broke last time.
 **In this repo, checks 1–6 are automated as notebook cells** in
 `colab_train_t4.ipynb`, section "7. Pre-flight checklist" (between the smoke
 test and the training cell). Run them top to bottom; each cell prints its own
-PASS/FAIL/SKIP. Locally, you can run the same logic with
+PASS/FAIL/SKIP. A shared **`CFG_FLAGS` cell (0a) is the single source of
+truth** for the T4 run's flags: cell 1c validates exactly that config, cell 1d
+projects its hours from it, and the train cell (section 8) runs it — change
+training behavior in 0a only. Locally, you can run the same logic with
 `python preflight.py`-style snippets or by executing the notebook cells in any
 GPU environment.
 
@@ -77,12 +81,22 @@ after Stage A passes → SAMPLER BUG, stop.
      form (Nichol & Dhariwal 2021) and the DDPM posterior formulas.
   2. **Cross-check vs `diffusers.DDPMScheduler`** (cosine) — allclose on the
      full betas vector. SKIPs with a note if diffusers isn't installed.
-  3. **Visual confirmation** (this is the one that catches what numbers don't):
+  3. **Algebra identities** (schedule-agnostic; these catch sign/coefficient
+     bugs that printed tables cannot): (a) the posterior-mean coefficient form
+     vs its closed form at t ∈ {1, 100, 500, 999} (err < 1e-4); (b) a
+     **`predict_x0` round-trip** for BOTH parameterizations — feed the true
+     ε (or true v) and x0 must come back (err < 1e-5 at t ≤ 900). `predict_x0`
+     is the exact function that held the original sampler bug. ⚠️ The check
+     deliberately excludes t > 950: with `√ᾱ₉₉₉ ≈ 5e-5`, float32 rounding is
+     amplified ~5000× and even a correct implementation shows ~2e-3 error —
+     a naive round-trip at t=999 false-fails on precision alone.
+  4. **Spot table** of the exact sampler coefficients at t ∈ {1, 100, 500, 999}.
+  5. **Visual confirmation** (this is the one that catches what numbers don't):
      (a) matplotlib curves of `βₜ`, `√ᾱₜ`, `√(1−ᾱₜ)`, posterior variance over
      all 1000 steps; (b) a **forward-noise strip** — one real dataset image
-     noised by `q_sample` at t = 0…999, so you can SEE the schedule destroy
-     the image at the right rate (image should stay mostly intact until
-     ~t≈400 and be pure noise by ~t≈800 with the cosine schedule).
+     noised by `q_sample` at t = 0…999 with the SAME ε at every t (so the only
+     thing changing is the schedule), showing the image intact until ~t≈400
+     and pure noise by ~t≈800 with the cosine schedule.
 
 ## 3. Config sanity pass — look for "silently does nothing" bugs
 
@@ -103,10 +117,14 @@ after Stage A passes → SAMPLER BUG, stop.
 **In this repo**: `train.py` prints a `[config-check]` block at startup of
 every run (attention levels that actually got attention modules, prediction
 target, EMA decay, effective batch, sampling/checkpoint cadence). Notebook
-cell "1c — config sanity" does the same plus an explicit demonstration of the
-exact-match trap. Know the default here: image 128 with mults (1,2,4) gives
-feature sizes 128/64/32, so `attention_resolutions=(16, 8)` means
-**bottleneck-only attention** — 3 SelfAttention modules, not one per level.
+cell "1c — config sanity" validates the `CFG_FLAGS` cell (the exact flags the
+train cell uses — cell-defaults and train-flags drifting apart is its own
+classic failure), plus an explicit demonstration of the exact-match trap, and
+asserts the built model's parameter count sits in a 14–16M sanity band around
+the known ~14.98M (catches accidental width/depth drift). Know the default
+here: image 128 with mults (1,2,4) gives feature sizes 128/64/32, so
+`attention_resolutions=(16, 8)` means **bottleneck-only attention** — 3
+SelfAttention modules, not one per level.
 
 ## 4. Two independent signals, not one
 
@@ -143,11 +161,20 @@ Static noise at healthy loss = sampler bug; stop.
       actually what you intend, and sanity-check whether you actually need
       gradient accumulation — if a straight larger batch fits in VRAM without
       it, accumulation just adds overhead for no benefit.
+- [ ] **Decode-check the ENTIRE dataset once** before a long run. A smoke run
+      touches only a fraction of the files; one corrupt image mid-dataset
+      otherwise kills the real run hours in. Iterating a DataLoader over all
+      images through the real preprocessing path is minutes of CPU.
 
-**In this repo**: notebook cell "1d — throughput & ETA" samples `nvidia-smi`,
-recomputes s/step from the smoke run's CSV, and projects total wall-clock
-hours (including grid overhead at your `--sample_every`). The T4 lesson:
-grids at the default 200-step cadence cost more than training does.
+**In this repo**: notebook cell "1d — throughput & ETA" does all of it: (a) a
+full-dataset decode sweep through the real `PixelArtDataset` path (toggle
+`RUN_DECODE_SWEEP`); (b) s/step from the **median of per-row elapsed deltas**
+in the isolated `logs/smoke_log.csv` — never total-elapsed ÷ steps, which the
+smoke run's ~6-min sample grid inflates ~16×, and immune to smoke-cell re-runs
+appending rows; (c) nvidia-smi sampled in a background thread DURING the
+resume runs (median util, warn < 50%) instead of one idle snapshot; (d) total
+budget projection including grid overhead at the `CFG_FLAGS` cadence. The T4
+lesson: grids at the default 200-step cadence cost more than training does.
 
 ## 6. Resume/checkpoint integrity check
 
@@ -159,12 +186,14 @@ grids at the default 200-step cadence cost more than training does.
       momentum, etc.) wasn't restored correctly, not just cosmetic.
 
 **In this repo**: notebook cell "1d" also runs a 40-step train → resume →
-10-step continuation on an ephemeral checkpoint dir and auto-checks the first
-post-resume loss against the last pre-resume loss (>3× = WARN). The resume
-run emits a sample grid at its first step (by design) — that's your item-4
-undertrained grid. History note: the EMA-washout bug (legacy checkpoint +
-warmup restart) is exactly the kind of thing this catches — resumed loss
-looked fine while resumed samples regressed.
+2-step continuation on an ephemeral checkpoint dir and compares the MEAN of
+the last 3 pre-resume losses vs the mean of the 2 post-resume losses (2× =
+WARN) — single-step losses swing ±50%, so a single-pair comparison
+false-warns. GPU utilization is sampled during those same runs. Each run
+emits a forced sample grid at its first step (by design) — that's your
+item-4 undertrained grid. History note: the EMA-washout bug (legacy
+checkpoint + warmup restart) is exactly the kind of thing this catches —
+resumed loss looked fine while resumed samples regressed.
 
 ## 7. Only then: kick off the real run
 
