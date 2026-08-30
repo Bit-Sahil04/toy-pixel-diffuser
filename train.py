@@ -152,6 +152,9 @@ def main() -> None:
                         help="override output dir for checkpoints (e.g. a Google Drive path on Colab)")
     parser.add_argument("--samples_dir", type=str, default=None)
     parser.add_argument("--log_csv", type=str, default=None)
+    parser.add_argument("--sample_every", type=int, default=None,
+                        help="steps between fixed-seed sample grids; raise on fast GPUs "
+                             "to cut wall-clock overhead")
     args = parser.parse_args()
 
     cfg = Config()
@@ -165,6 +168,7 @@ def main() -> None:
     if args.checkpoint_dir is not None: cfg.checkpoint_dir = args.checkpoint_dir
     if args.samples_dir is not None: cfg.samples_dir = args.samples_dir
     if args.log_csv is not None: cfg.log_csv = args.log_csv
+    if args.sample_every is not None: cfg.sample_every = args.sample_every
 
     if not cfg.unconditional:
         # Phase-2 seam: the dataset already returns captions when
