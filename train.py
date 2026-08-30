@@ -30,7 +30,7 @@ from torchvision.utils import save_image
 from config import Config
 from data import PixelArtDataset, ensure_data
 from diffusion import Diffusion
-from model import build_model
+from model import SelfAttention, build_model
 
 
 # ------------------------------------------------------------------------------
@@ -81,6 +81,34 @@ def vram_guard(cfg: Config, total_vram_gb: float) -> None:
               f"({cfg.vram_safety_fraction:.0%}) of {total_vram_gb:.2f}GB VRAM. "
               f"Lower batch_size (try 4-8), reduce image_size, or lower base_channels.")
         print("[vram-guard] Continuing anyway — this is a soft guard. Expect OOM risk.")
+
+
+def print_config_summary(cfg: Config, model: torch.nn.Module) -> None:
+    """Pre-flight checklist item 3 (docs/preflight_checklist.md): print what
+    the config ACTUALLY does at runtime, not what it looks like it does.
+
+    The classic silent failure this catches: exact-match config checks against
+    computed values — e.g. attention_resolutions=(16, 8) never matching real
+    feature maps of [128, 64, 32], so attention "looks configured" but only
+    the bottleneck ever attends.
+    """
+    feat_sizes = [cfg.image_size // (2 ** i) for i in range(len(cfg.channel_mults))]
+    attn_at = max(cfg.attention_resolutions) if cfg.attention_resolutions else 0
+    attn_levels = [f"{s}px" for s in feat_sizes if s <= attn_at]
+    n_attn = sum(1 for m in model.modules() if isinstance(m, SelfAttention))
+    print("[config-check] ------------------------------------------")
+    print(f"[config-check] feature sizes per level: {feat_sizes}px | "
+          f"attention applies where size <= {attn_at}px")
+    level_txt = ", ".join(attn_levels) if attn_levels \
+        else "none — only the mid/bottleneck block attends"
+    print(f"[config-check] level attention: {level_txt} "
+          f"({n_attn} SelfAttention module(s) total, incl. mid)")
+    print(f"[config-check] prediction_target={cfg.prediction_target} | "
+          f"EMA decay={cfg.ema_decay} (bias-warmup first ~10 updates)")
+    print(f"[config-check] effective batch = {cfg.batch_size}x{cfg.grad_accum_steps}"
+          f"={cfg.batch_size * cfg.grad_accum_steps} | grid every {cfg.sample_every} "
+          f"steps | ckpt every {cfg.ckpt_every} (keep {cfg.keep_last_k})")
+    print("[config-check] ------------------------------------------")
 
 
 def format_eta(seconds: float) -> str:
@@ -283,6 +311,7 @@ def main() -> None:
     model = model.to(memory_format=torch.channels_last)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params / 1e6:.2f}M params, prediction_target={cfg.prediction_target}")
+    print_config_summary(cfg, model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.amp.GradScaler("cuda")
     ema = EMA(model, cfg.ema_decay)

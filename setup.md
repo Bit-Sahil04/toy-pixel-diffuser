@@ -109,6 +109,11 @@ Outputs:
 
 ## 6. Watching progress
 
+Before any long run, work through the pre-flight checklist
+(`docs/preflight_checklist.md`) — tiny-overfit test, scheduler sanity check,
+config-effect summary, throughput estimate, resume-integrity test. It is
+automated as notebook section 7 in `colab_train_t4.ipynb`.
+
 ```bash
 python make_gif.py    # samples/step_*.png -> samples/training_progress.gif
 ```
