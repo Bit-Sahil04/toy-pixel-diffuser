@@ -205,8 +205,8 @@ resumed loss looked fine while resumed samples regressed.
       marks — decide this *before* starting, so you're not guessing at 2am
       whether a half-finished run looks on track.
 
-**In this repo, 20k steps, T4, defaults**: effective batch 64 (32×2), 50k
-images → ~19 epochs. Working looks like: 25% (5k) — coherent color fields and
+**In this repo, 20k steps, T4**: effective batch 64 (32×2), 50k images → ~26
+epochs. Working looks like: 25% (5k) — coherent color fields and
 rough character-shaped blobs; 50% (10k) — recognizable 4-view sprite layout,
 white background dominates; 100% (20k) — clean LPC-style sprites with correct
 silhouettes, some mode collapse toward common palettes is normal.
