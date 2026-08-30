@@ -41,8 +41,10 @@ def main() -> None:
 
     # Use the saved EMA weights — cleaner samples than raw training weights.
     model = build_model(cfg).to(device)
-    ema = ckpt["ema"]
-    model.load_state_dict({k: v.to(device) for k, v in ema.items()})
+    raw_ema = ckpt["ema"]
+    if isinstance(raw_ema, dict) and "shadow" in raw_ema:
+        raw_ema = raw_ema["shadow"]   # current format {"shadow", "num_updates"}
+    model.load_state_dict({k: v.to(device) for k, v in raw_ema.items()})
     model.eval()
 
     diffusion = Diffusion(cfg.timesteps, cfg.beta_schedule, cfg.prediction_target, device)

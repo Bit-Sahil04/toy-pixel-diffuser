@@ -148,14 +148,22 @@ class Diffusion:
             if i == 0:
                 x = x0
                 break
+            # Standard DDPM posterior q(x_{t-1} | x_t, x0):
+            #   mean = sqrt(abar_{t-1})*beta_t/(1-abar_t) * x0
+            #        + sqrt(alpha_t)*(1-abar_{t-1})/(1-abar_t) * x_t
+            #   var  = beta_t * (1-abar_{t-1})/(1-abar_t)          (beta_tilde)
+            # with alpha_t = 1 - beta_t taken from the PER-STEP betas, not from
+            # the cumulative alphas — (1 - abar_t) is the total noise level and
+            # is NOT beta_t (this was a bug; see git history).
             alpha_cum = self.alphas_cumprod[i]
             alpha_cum_prev = self.alphas_cumprod[i - 1]
-            beta = 1.0 - alpha_cum
-            # posterior mean coefficients (standard DDPM ancestral step)
-            coef_x0 = (alpha_cum_prev.sqrt() * beta) / (1.0 - alpha_cum)
-            coef_xt = ((1.0 - alpha_cum_prev).sqrt() * beta) / (1.0 - alpha_cum)
+            beta_t = self.betas[i]
+            alpha_t = 1.0 - beta_t
+            denom = 1.0 - alpha_cum
+            coef_x0 = alpha_cum_prev.sqrt() * beta_t / denom
+            coef_xt = alpha_t.sqrt() * (1.0 - alpha_cum_prev) / denom
             mean = coef_x0 * x0 + coef_xt * x
-            var = (1.0 - alpha_cum_prev) / (1.0 - alpha_cum) * beta
+            var = beta_t * (1.0 - alpha_cum_prev) / denom
             noise = torch.randn(x.shape, generator=gen, dtype=torch.float32).to(device)
             x = mean + var.sqrt() * noise
         model.train(was_training)

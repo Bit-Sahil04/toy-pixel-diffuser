@@ -27,6 +27,9 @@ Design notes (read before "fixing" anything here):
 * Unconditional mode (default) ignores captions entirely. The caption lookup
   is kept behind `unconditional=False` as the phase-2 seam — no text encoder
   is built or debugged in this pass.
+* Data loading is cache-first: `data_raw/` is downloaded/extracted exactly
+  once; `datasets.load_dataset` is only a fallback if the direct hub download
+  fails (it duplicates the whole dataset into an arrow cache we never read).
 """
 
 from __future__ import annotations
@@ -114,18 +117,30 @@ def download_manual() -> tuple[Path, Path]:
     return images_dir, captions_csv
 
 
-def ensure_data() -> tuple[Path, Path | None]:
-    """Return (images_dir, captions_csv_or_None). Uses load_dataset if possible."""
+def ensure_data() -> tuple[Path, Path]:
+    """Return (images_dir, captions_csv). Cache-first, download once.
+
+    Order: (1) if data_raw/ already has the extracted dataset, use it — this
+    makes every resume/relaunch after the first one instant and skips the
+    expensive duplicate work; (2) otherwise manual hf_hub_download of the zip
+    + captions (this is the path the pipeline actually reads from);
+    (3) datasets.load_dataset only as a last-resort fallback if the hub file
+    download fails (e.g. layout change) — it warms the HF cache, after which
+    the manual path is retried.
+    """
+    images_dir = DATA_ROOT / "images" / "train"
+    captions_csv = DATA_ROOT / "captions.csv"
+    if images_dir.exists() and captions_csv.exists():
+        print(f"[data] using cached dataset at {images_dir}")
+        return images_dir, captions_csv
     try:
+        return download_manual()
+    except Exception as e:  # noqa: BLE001
+        print(f"[data] manual download failed ({type(e).__name__}: {e}); "
+              f"trying datasets.load_dataset as fallback.")
         import datasets as hf_datasets
         hf_datasets.load_dataset("carlosuperb/lpc-4view-pixel-art-diffusion")
-        # If load_dataset succeeded it caches the underlying files; the manual
-        # path below reuses those cached downloads via hf_hub_download, so this
-        # costs nothing extra while giving us a stable on-disk layout we control.
-        print("[data] load_dataset resolved the repo; using manual file layout on top of its cache.")
-    except Exception as e:  # noqa: BLE001
-        print(f"[data] load_dataset failed ({type(e).__name__}: {e}); falling back to manual download.")
-    return download_manual()
+        return download_manual()
 
 
 # ------------------------------------------------------------------------------

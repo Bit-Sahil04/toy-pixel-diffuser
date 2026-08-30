@@ -149,7 +149,14 @@ class UNet(nn.Module):
         levels = len(channel_mults)
         chans = [base_channels * m for m in channel_mults]
         feat_sizes = [image_size // (2**i) for i in range(levels)]
-        attn_at = {s for s in attention_resolutions}
+        # attention applies at any level whose feature map is <= the largest
+        # configured resolution ("attention_resolutions" semantics, see config).
+        # NOTE: changing this (or any channel/depth knob) rebuilds the model —
+        # checkpoints from a differently-configured model will not load.
+        attn_at = max(attention_resolutions) if attention_resolutions else 0
+        assert image_size % (2 ** (levels - 1)) == 0, (
+            f"image_size {image_size} not divisible by 2^{levels - 1}; "
+            f"feature sizes {feat_sizes} would not be integral")
 
         # ---------------- encoder ----------------
         # Static record of every skip pushed in the encoder (pop order in the
@@ -168,7 +175,7 @@ class UNet(nn.Module):
                 prev_ch = out_ch
             self.down_blocks.append(blocks)
             self.down_attns.append(
-                SelfAttention(prev_ch) if feat_sizes[lvl] in attn_at else nn.Identity()
+                SelfAttention(prev_ch) if feat_sizes[lvl] <= attn_at else nn.Identity()
             )
             if lvl < levels - 1:
                 self.down_samples.append(Downsample(prev_ch))
@@ -194,7 +201,7 @@ class UNet(nn.Module):
                 prev_ch = out_ch
             self.up_blocks.append(blocks)
             self.up_attns.append(
-                SelfAttention(prev_ch) if feat_sizes[lvl] in attn_at else nn.Identity()
+                SelfAttention(prev_ch) if feat_sizes[lvl] <= attn_at else nn.Identity()
             )
             if lvl > 0:
                 self.up_samples.append(Upsample(prev_ch))

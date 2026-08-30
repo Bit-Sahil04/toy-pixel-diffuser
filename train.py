@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torchvision.utils import save_image
 
 from config import Config
 from data import PixelArtDataset, ensure_data
@@ -92,17 +93,24 @@ class EMA:
     EMA weights are saved separately in every checkpoint and are what
     sampling/eval uses by default — EMA samples are typically much cleaner
     than raw weights mid-training (same trick as the reference tutorial).
+
+    Includes standard bias warmup: the effective decay ramps as
+    min(decay, (1+n)/(10+n)) over updates n, so early EMA isn't dominated by
+    the random initial weights.
     """
 
     def __init__(self, model: torch.nn.Module, decay: float):
         self.decay = decay
+        self.num_updates = 0
         self.shadow = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
+        self.num_updates += 1
+        d = min(self.decay, (1 + self.num_updates) / (10 + self.num_updates))
         for k, v in model.state_dict().items():
             if v.dtype.is_floating_point:
-                self.shadow[k].mul_(self.decay).add_(v.detach().float(), alpha=1.0 - self.decay)
+                self.shadow[k].mul_(d).add_(v.detach().float(), alpha=1.0 - d)
             else:
                 self.shadow[k] = v.detach().clone().float()
 
@@ -118,9 +126,34 @@ def save_checkpoint(cfg: Config, path: Path, model, optimizer, scaler, ema, step
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),     # Adam moments — required for clean resume
         "scaler": scaler.state_dict(),           # AMP scaler state
-        "ema": ema.shadow,
+        "ema": {"shadow": ema.shadow, "num_updates": ema.num_updates},
         "config": dataclasses.asdict(cfg),
     }, path)
+
+
+def _same(a, b) -> bool:
+    """Config-value comparison tolerating tuple-vs-list (JSON round-trip)."""
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        return list(a) == list(b)
+    return a == b
+
+
+def warn_config_mismatch(ckpt_cfg: dict, cfg: Config) -> None:
+    """Warn if structural settings differ from the checkpoint being resumed.
+
+    Shape-affecting mismatches fail loudly at load_state_dict anyway; this
+    catches the SILENT ones (prediction_target / timesteps / beta_schedule
+    change the math without changing any tensor shape).
+    """
+    structural = ("image_size", "base_channels", "channel_mults", "num_res_blocks",
+                  "attention_resolutions", "timesteps", "beta_schedule", "prediction_target")
+    for key in structural:
+        old = ckpt_cfg.get(key) if ckpt_cfg else None
+        if old is not None and not _same(old, getattr(cfg, key)):
+            print(f"[resume] WARNING: config '{key}' differs from checkpoint "
+                  f"({old!r} -> {getattr(cfg, key)!r}). Shape-affecting changes fail "
+                  f"at load; math-affecting ones (timesteps/beta/prediction_target) "
+                  f"silently change behavior. Proceed only if intended.")
 
 
 def keep_last_k(checkpoint_dir: Path, k: int) -> None:
@@ -226,8 +259,16 @@ def main() -> None:
         optimizer.load_state_dict(ckpt["optimizer"])   # restores Adam m/v — no loss spike on resume
         scaler.load_state_dict(ckpt["scaler"])
         ema = EMA(model, cfg.ema_decay)
-        ema.shadow = {k: v.to(device) for k, v in ckpt["ema"].items()}
+        raw_ema = ckpt["ema"]
+        if isinstance(raw_ema, dict) and "shadow" in raw_ema:
+            # current format: {"shadow": ..., "num_updates": ...}
+            ema.shadow = {k: v.to(device) for k, v in raw_ema["shadow"].items()}
+            ema.num_updates = int(raw_ema.get("num_updates", 0))
+        else:
+            # legacy format (pre-fix checkpoints): bare tensor dict
+            ema.shadow = {k: v.to(device) for k, v in raw_ema.items()}
         start_step = ckpt["step"]
+        warn_config_mismatch(ckpt.get("config", {}), cfg)
         print(f"resumed from {args.resume_from} at step {start_step} "
               f"(optimizer + AMP scaler + EMA state restored)")
 
@@ -291,13 +332,16 @@ def main() -> None:
 
         # ------------- fixed-seed qualitative samples (primary eval) -------------
         if step % cfg.sample_every == 0 or step == start_step + 1:
+            # Release cached training activation blocks FIRST: on small-VRAM
+            # GPUs the batch-16 sampling activations + the EMA model copy can
+            # otherwise spill into shared system memory, slowing sampling ~4x.
+            torch.cuda.empty_cache()
             ema_model = build_model(cfg).to(device).to(memory_format=torch.channels_last)
             ema.copy_to(ema_model)
             grid_n = cfg.sample_grid * cfg.sample_grid
             imgs = diffusion.sample(ema_model, grid_n, cfg.image_size, seed=cfg.sample_seed)
             # fixed seed => same initial noise every time; grids are directly
             # comparable across steps so you can watch sprites emerge.
-            from torchvision.utils import save_image
             out = samples_dir / f"step_{step:05d}.png"
             save_image(imgs, out, nrow=cfg.sample_grid)
             print(f"  saved sample grid -> {out}")

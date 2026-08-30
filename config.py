@@ -5,7 +5,7 @@ flags) so nothing is scattered across modules. Defaults are chosen for an
 RTX 3050 Laptop with 4GB VRAM — deliberately conservative.
 """
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
 
@@ -29,7 +29,13 @@ class Config:
     base_channels: int = 64             # width of first UNet level (SD uses 320; keep small)
     channel_mults: tuple = (1, 2, 4)    # depth multiplier per resolution level
     num_res_blocks: int = 2             # residual blocks per level
-    attention_resolutions: tuple = (16, 8)  # apply self-attention when feature map is <= this px
+    attention_resolutions: tuple = (16, 8)  # apply self-attention at levels whose feature map
+                                        # is <= the largest of these sizes. At the default
+                                        # image_size=128 with mults (1,2,4), level sizes are
+                                        # 128/64/32, so (16,8) gives BOTTLENECK-ONLY attention
+                                        # (the bottleneck always attends). Use (32,) to also
+                                        # attend at the deepest level. Changing this rebuilds
+                                        # the model (old checkpoints won't load).
     dropout: float = 0.0
     prediction_target: str = "epsilon"  # "epsilon" (implemented) or "v_prediction" (seam, see model.py)
 
@@ -43,7 +49,9 @@ class Config:
     lr: float = 2e-4
     weight_decay: float = 0.0
     max_train_steps: int = 20000
-    ema_decay: float = 0.9999
+    ema_decay: float = 0.999             # horizon ~1k steps — sane for a 20k-step run.
+                                        # (0.9999 would lag half the run; EMA also warms up
+                                        # early, see train.EMA)
     max_vram_gb: float | None = None    # None = auto-detect from the active GPU (recommended).
                                         # Set explicitly to override the soft guard's total.
     vram_safety_fraction: float = 0.85  # warn if heuristic estimate > this fraction of VRAM
