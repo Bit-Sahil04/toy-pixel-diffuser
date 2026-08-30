@@ -48,6 +48,8 @@ from torchvision import transforms
 DATA_ROOT = Path("data_raw")
 ZIP_NAME = "images/train.zip"
 CAPTIONS_NAME = "captions/captions.csv"
+MARKER = DATA_ROOT / ".dataset_complete"   # written only after a fully verified extract
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 
 # ------------------------------------------------------------------------------
 # Normalization: single source of truth for [-1, 1] <-> [0, 1] conversion.
@@ -90,7 +92,16 @@ def load_image_rgb(path: Path, background: tuple = (255, 255, 255)) -> Image.Ima
 # Dataset download: try load_dataset first, fall back to manual zip handling.
 # ------------------------------------------------------------------------------
 
-def download_manual() -> tuple[Path, Path]:
+def _count_images(images_dir: Path) -> int:
+    return sum(1 for p in images_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTS)
+
+
+def _count_captions(captions_csv: Path) -> int:
+    with open(captions_csv, newline="", encoding="utf-8") as f:
+        return sum(1 for _ in csv.DictReader(f))
+
+
+def download_manual(force_extract: bool = False) -> tuple[Path, Path]:
     """Manually fetch train.zip + captions.csv via huggingface_hub and extract."""
     from huggingface_hub import hf_hub_download
 
@@ -106,11 +117,20 @@ def download_manual() -> tuple[Path, Path]:
         repo_type="dataset",
     )
     images_dir = DATA_ROOT / "images" / "train"
-    if not images_dir.exists():
+    if not images_dir.exists() or force_extract:
+        # NOTE: extractall creates the directory before finishing, so the dir
+        # existing proves nothing. force_extract=True is passed when a prior
+        # interrupted run left a PARTIAL extraction behind — wipe it first.
+        if force_extract and images_dir.exists():
+            shutil.rmtree(images_dir)
         images_dir.parent.mkdir(parents=True, exist_ok=True)
         print(f"Extracting {zip_local} -> {images_dir.parent} ...")
         with zipfile.ZipFile(zip_local) as zf:
             zf.extractall(images_dir.parent)
+        # only mark complete after a full, verified extraction
+        n = _count_images(images_dir)
+        MARKER.write_text(f"{n} images\n")
+        print(f"[data] extraction complete and verified: {n} images")
     captions_csv = DATA_ROOT / "captions.csv"
     if not captions_csv.exists():
         shutil.copy(cap_local, captions_csv)
@@ -120,19 +140,42 @@ def download_manual() -> tuple[Path, Path]:
 def ensure_data() -> tuple[Path, Path]:
     """Return (images_dir, captions_csv). Cache-first, download once.
 
-    Order: (1) if data_raw/ already has the extracted dataset, use it — this
-    makes every resume/relaunch after the first one instant and skips the
-    expensive duplicate work; (2) otherwise manual hf_hub_download of the zip
-    + captions (this is the path the pipeline actually reads from);
+    Order: (1) if data_raw/ is present AND verified (marker file from a prior
+    complete extraction, or an image count that matches the caption rows —
+    this accepts the pre-marker data_raw/ directories from earlier versions),
+    use it — resumes/relaunches are instant; (2) otherwise manual
+    hf_hub_download of the zip + captions, with a forced re-extract if a
+    previous interrupted run left a PARTIAL extraction behind (extractall
+    creates the target dir before finishing, so dir-exists proves nothing);
     (3) datasets.load_dataset only as a last-resort fallback if the hub file
-    download fails (e.g. layout change) — it warms the HF cache, after which
-    the manual path is retried.
+    download fails — it warms the HF cache, after which the manual path is
+    retried.
     """
     images_dir = DATA_ROOT / "images" / "train"
     captions_csv = DATA_ROOT / "captions.csv"
     if images_dir.exists() and captions_csv.exists():
-        print(f"[data] using cached dataset at {images_dir}")
-        return images_dir, captions_csv
+        if MARKER.exists():
+            print(f"[data] using cached dataset at {images_dir}")
+            return images_dir, captions_csv
+        # no marker: maybe a partial extraction from an interrupted first
+        # download. Verify by counting images vs caption rows before trusting it.
+        n_img = _count_images(images_dir)
+        n_cap = _count_captions(captions_csv)
+        if n_img == n_cap and n_img > 0:
+            MARKER.write_text(f"{n_img} images\n")
+            print(f"[data] verified existing dataset ({n_img} images == {n_cap} captions); "
+                  f"using cache at {images_dir}")
+            return images_dir, captions_csv
+        print(f"[data] WARNING: data_raw is INCOMPLETE ({n_img} images vs {n_cap} captions) — "
+              f"likely an interrupted extraction. Re-downloading and re-extracting.")
+        try:
+            return download_manual(force_extract=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[data] manual download failed ({type(e).__name__}: {e}); "
+                  f"trying datasets.load_dataset as fallback.")
+            import datasets as hf_datasets
+            hf_datasets.load_dataset("carlosuperb/lpc-4view-pixel-art-diffusion")
+            return download_manual(force_extract=True)
     try:
         return download_manual()
     except Exception as e:  # noqa: BLE001

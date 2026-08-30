@@ -15,8 +15,11 @@ Usage:
 import argparse
 import csv
 import dataclasses
+import os
 import random
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -119,16 +122,34 @@ class EMA:
                                for k, v in self.shadow.items()})
 
 
-def save_checkpoint(cfg: Config, path: Path, model, optimizer, scaler, ema, step: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+def save_checkpoint(cfg: Config, checkpoint_dir: Path, model, optimizer, scaler, ema, step: int) -> None:
+    """Save ckpt_XXXXXXX.pt + latest.pt with ONE serialization.
+
+    torch.save streams bytes through whatever filesystem `path` sits on. On
+    Colab that is the Drive FUSE mount, where small writes are extremely slow
+    and the previous code paid that cost twice per checkpoint (once for
+    ckpt_XXXX.pt, once for latest.pt). Instead: serialize once to a LOCAL
+    temp file (fast disk), then plain-copy the finished file to the target
+    directory — a single large sequential write is much cheaper than a
+    streamed serialization.
+    """
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
         "step": step,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),     # Adam moments — required for clean resume
         "scaler": scaler.state_dict(),           # AMP scaler state
         "ema": {"shadow": ema.shadow, "num_updates": ema.num_updates},
         "config": dataclasses.asdict(cfg),
-    }, path)
+    }
+    fd, tmp = tempfile.mkstemp(suffix=".pt")     # always local disk
+    os.close(fd)
+    try:
+        torch.save(payload, tmp)
+        shutil.copyfile(tmp, checkpoint_dir / f"ckpt_{step:07d}.pt")
+        shutil.copyfile(tmp, checkpoint_dir / "latest.pt")
+    finally:
+        os.unlink(tmp)
 
 
 def _same(a, b) -> bool:
@@ -160,6 +181,22 @@ def keep_last_k(checkpoint_dir: Path, k: int) -> None:
     ckpts = sorted(checkpoint_dir.glob("ckpt_*.pt"))
     for old in ckpts[:-k]:
         old.unlink(missing_ok=True)
+
+
+def flush_log(log_path: Path, rows: list) -> None:
+    """Append buffered CSV rows in ONE open/append/close.
+
+    train.py used to open+write+close the CSV every step. When log_csv is on
+    a Drive FUSE mount (Colab) that is a synchronous round-trip per step.
+    Rows are now buffered in memory and flushed in bulk every LOG_FLUSH_EVERY
+    steps and before every long pause (sampling / checkpointing), so a crash
+    loses at most ~50 rows.
+    """
+    if not rows:
+        return
+    with open(log_path, "a", newline="") as f:
+        csv.writer(f).writerows(rows)
+    rows.clear()
 
 
 # ------------------------------------------------------------------------------
@@ -265,8 +302,13 @@ def main() -> None:
             ema.shadow = {k: v.to(device) for k, v in raw_ema["shadow"].items()}
             ema.num_updates = int(raw_ema.get("num_updates", 0))
         else:
-            # legacy format (pre-fix checkpoints): bare tensor dict
+            # legacy format (pre-fix checkpoints): bare tensor dict.
+            # Seed the warmup counter with the resume step — otherwise it
+            # restarts at 0 and min(decay,(1+n)/(10+n)) runs at tiny effective
+            # decay for ~100 updates, washing the restored shadow out with raw
+            # weights (first post-resume grids would be raw-weight quality).
             ema.shadow = {k: v.to(device) for k, v in raw_ema.items()}
+            ema.num_updates = ckpt["step"]
         start_step = ckpt["step"]
         warn_config_mismatch(ckpt.get("config", {}), cfg)
         print(f"resumed from {args.resume_from} at step {start_step} "
@@ -281,6 +323,8 @@ def main() -> None:
     if not log_path.exists() and start_step == 0:
         with open(log_path, "w", newline="") as f:
             csv.writer(f).writerow(["step", "loss", "lr", "elapsed_s"])
+    log_buffer: list = []
+    LOG_FLUSH_EVERY = 50
 
     # ------------------------------ train ------------------------------
     model.train()
@@ -292,7 +336,7 @@ def main() -> None:
 
     while step < cfg.max_train_steps:
         optimizer.zero_grad(set_to_none=True)
-        accum_loss = 0.0
+        accum_loss = torch.zeros((), device=device)   # stays on GPU — no sync per micro-batch
         for _ in range(cfg.grad_accum_steps):
             try:
                 batch = next(data_iter)
@@ -306,7 +350,10 @@ def main() -> None:
             with torch.amp.autocast("cuda"):
                 loss = diffusion.training_losses(model, x0) / cfg.grad_accum_steps
             scaler.scale(loss).backward()
-            accum_loss += loss.item()
+            accum_loss += loss.detach()
+
+        # single GPU sync per optimizer step (was one .item() per micro-batch)
+        loss_value = accum_loss.item()
 
         scaler.step(optimizer)
         scaler.update()
@@ -318,20 +365,24 @@ def main() -> None:
             # average includes sampling/checkpoint pauses so the ETA is honest wall-clock
             sps = (time.time() - t0) / max(step - start_step, 1)
             eta = format_eta((cfg.max_train_steps - step) * sps)
-            print(f"step {step:6d} | loss {accum_loss:.4f} | lr {lr_now:.2e} | "
+            print(f"step {step:6d} | loss {loss_value:.4f} | lr {lr_now:.2e} | "
                   f"{sps:.2f} s/step | eta {eta}")
 
-        with open(log_path, "a", newline="") as f:
-            csv.writer(f).writerow([step, f"{accum_loss:.6f}",
-                                    optimizer.param_groups[0]["lr"],
-                                    f"{time.time() - t0:.1f}"])
+        # buffered CSV: one FUSE round-trip every LOG_FLUSH_EVERY steps,
+        # not one per step
+        log_buffer.append([step, f"{loss_value:.6f}",
+                           optimizer.param_groups[0]["lr"],
+                           f"{time.time() - t0:.1f}"])
+        if step % LOG_FLUSH_EVERY == 0:
+            flush_log(log_path, log_buffer)
 
         # OPTIONAL WANDB HOOK: if cfg.wandb_project is set and wandb is
-        # installed, a wandb.log({"loss": accum_loss, "step": step}) call goes
+        # installed, a wandb.log({"loss": loss_value, "step": step}) call goes
         # here. Deliberately not wired — logging stays local by default.
 
         # ------------- fixed-seed qualitative samples (primary eval) -------------
         if step % cfg.sample_every == 0 or step == start_step + 1:
+            flush_log(log_path, log_buffer)   # don't lose rows across the multi-minute pause
             # Release cached training activation blocks FIRST: on small-VRAM
             # GPUs the batch-16 sampling activations + the EMA model copy can
             # otherwise spill into shared system memory, slowing sampling ~4x.
@@ -350,13 +401,12 @@ def main() -> None:
 
         # ------------- checkpointing (resumable, keep last k + latest) -------------
         if step % cfg.ckpt_every == 0 or step == cfg.max_train_steps:
-            save_checkpoint(cfg, checkpoint_dir / f"ckpt_{step:07d}.pt",
-                            model, optimizer, scaler, ema, step)
-            save_checkpoint(cfg, checkpoint_dir / "latest.pt",
-                            model, optimizer, scaler, ema, step)
+            flush_log(log_path, log_buffer)   # rows survive even if a Drive copy fails
+            save_checkpoint(cfg, checkpoint_dir, model, optimizer, scaler, ema, step)
             keep_last_k(checkpoint_dir, cfg.keep_last_k)
             print(f"  checkpoint saved (step {step})")
 
+    flush_log(log_path, log_buffer)
     print("done.")
 
 
