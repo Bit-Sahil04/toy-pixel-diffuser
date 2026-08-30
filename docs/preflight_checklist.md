@@ -23,23 +23,34 @@ GPU environment.
 - [ ] Take **8–16 samples** from your real dataset (not synthetic/random data —
       use the real thing so real data-loading and preprocessing code paths are
       exercised).
-- [ ] Train for a few hundred steps (enough for loss to bottom out on this tiny
-      set — watch the loss curve flatten).
+- [ ] Train until the loss genuinely bottoms out (early-stop at ε-MSE < 0.02 —
+      ~0.08 is NOT converged for memorization purposes; watch the curve flatten).
 - [ ] Sample from the model and check it can **near-perfectly reproduce these
       specific examples**.
-- [ ] **Pass condition**: recognizable, close-to-input outputs. **Fail
-      condition**: static, blank, or unstructured noise even after loss has
-      clearly converged.
+- [ ] **Pass condition**: recognizable, close-to-input outputs (reconNCC(t=500)
+      > 0.8, sample NCC > 0.5). **Fail condition**: static, blank, or
+      unstructured noise even after loss has clearly converged.
 - [ ] If it fails: the bug is structural (sampler, architecture, data
       pipeline) — do not proceed to a real run. This single test would have
       caught the `coef_xt` sampler bug in ~5 minutes instead of after 5,400
       steps of a real run.
 
-**In this repo**: notebook cell "1a — tiny-overfit". 16 real LPC sprites,
-300 steps, then a full 1000-step DDPM sample. Automated metric: normalized
-cross-correlation (NCC) between each output and its target; PASS if mean
-NCC > 0.6 (an overfit this hard should reach >0.9). Side-by-side display:
-originals on top, samples below — eyeball them too.
+**In this repo**: notebook cell "1a — tiny-overfit". Two stages, because a single
+end-to-end score can false-alarm:
+  * **Stage A — memorization probe**: 8 real sprites, overfit with early-stop at
+    loss < 0.02 (cap 1500 steps), then ONE forward pass at fixed t ∈ {300, 500}:
+    recover x0 from x_t and score NCC vs the original. No 1000-step error
+    compounding. Untrained ≈ 0.2–0.5; overfit > 0.9. PASS bar: 0.8.
+    ⚠️ Do NOT probe at low t (≤150): x_t is mostly signal there, so even an
+    untrained model scores ~0.99 — the metric is only meaningful at t ≥ 300.
+  * **Stage B — end-to-end sampler**: full 1000-step DDPM sample from pure
+    noise; NCC vs targets. PASS bar: 0.5. This is where residual training error
+    shows up amplified: at ε-MSE ≈ 0.08 (300 overfit steps) samples score
+    NCC ≈ 0.1 even though the pipeline is perfectly fine — that run false-
+    alarmed and the stage split exists to prevent exactly that.
+Failure routing: Stage A fails while loss still falls → UNDERTRAINED, raise
+MAX_STEPS. Stage A fails with flat loss → STRUCTURAL BUG, stop. Stage B fails
+after Stage A passes → SAMPLER BUG, stop.
 
 ## 2. Numerically sanity-check anything you reimplemented from a formula
 
